@@ -32,6 +32,7 @@ object MaxThroughputSpec extends MultiNodeConfig {
     ConfigFactory.parseString(s"""
        # for serious measurements you should increase the totalMessagesFactor (20)
        akka.test.MaxThroughputSpec.totalMessagesFactor = 1.0
+       akka.test.MaxThroughputSpec.real-message = on # FIXME use off as default
        akka {
          loglevel = INFO
          log-dead-letters = 1000000
@@ -45,9 +46,11 @@ object MaxThroughputSpec extends MultiNodeConfig {
 
            serializers {
              test = "akka.remote.artery.MaxThroughputSpec$$TestSerializer"
+             test-message = "akka.remote.artery.TestMessageSerializer"
            }
            serialization-bindings {
              "akka.remote.artery.MaxThroughputSpec$$FlowControl" = test
+             "akka.remote.artery.TestMessage" = test-message
            }
          }
          remote.artery {
@@ -56,8 +59,8 @@ object MaxThroughputSpec extends MultiNodeConfig {
            # for serious measurements when running this test on only one machine
            # it is recommended to use external media driver
            # See akka-remote-tests/src/test/resources/aeron.properties
-           #advanced.embedded-media-driver = off
-           #advanced.aeron-dir = "target/aeron"
+           advanced.embedded-media-driver = off
+           advanced.aeron-dir = "target/aeron"
 
            advanced.compression {
              actor-refs.advertisement-interval = 2 second
@@ -84,6 +87,9 @@ object MaxThroughputSpec extends MultiNodeConfig {
     def receive = {
       case msg: Array[Byte] ⇒
         if (msg.length != payloadSize) throw new IllegalArgumentException("Invalid message")
+        reporter.onMessage(1, payloadSize)
+        c += 1
+      case msg: TestMessage ⇒
         reporter.onMessage(1, payloadSize)
         c += 1
       case Start ⇒
@@ -193,10 +199,22 @@ object MaxThroughputSpec extends MultiNodeConfig {
 
     def sendBatch(): Unit = {
       val batchSize = math.min(remaining, burstSize)
+
       var i = 0
       while (i < batchSize) {
-        //        target ! payload
-        target.tell(payload, ActorRef.noSender)
+        val msg =
+          if (realMessage)
+            TestMessage(
+              id = totalMessages - remaining + i,
+              name = "abc",
+              status = i % 2 == 0,
+              description = "ABC",
+              payload = payload,
+              items = Vector(TestMessage.Item(1, "A"), TestMessage.Item(2, "B")))
+          else payload
+
+        //        target ! msg
+        target.tell(msg, ActorRef.noSender)
         i += 1
       }
       remaining -= batchSize
@@ -215,7 +233,8 @@ object MaxThroughputSpec extends MultiNodeConfig {
     totalMessages:       Long,
     burstSize:           Int,
     payloadSize:         Int,
-    senderReceiverPairs: Int) {
+    senderReceiverPairs: Int,
+    realMessage:         Boolean) {
     // data based on measurement
     def totalSize(system: ActorSystem) = payloadSize + (if (CompressionSettings(system).enabled) 38 else 110)
   }
@@ -268,6 +287,7 @@ abstract class MaxThroughputSpec
   import MaxThroughputSpec._
 
   val totalMessagesFactor = system.settings.config.getDouble("akka.test.MaxThroughputSpec.totalMessagesFactor")
+  val realMessage = system.settings.config.getBoolean("akka.test.MaxThroughputSpec.real-message")
 
   var plot = PlotResult()
 
@@ -298,36 +318,62 @@ abstract class MaxThroughputSpec
   }
 
   val scenarios = List(
+    //    TestSettings(
+    //      testName = "warmup",
+    //      totalMessages = adjustedTotalMessages(20000),
+    //      burstSize = 1000,
+    //      payloadSize = 100,
+    //      senderReceiverPairs = 1,
+    //      realMessage),
+    //    TestSettings(
+    //      testName = "1-to-1",
+    //      totalMessages = adjustedTotalMessages(50000),
+    //      burstSize = 1000,
+    //      payloadSize = 100,
+    //      senderReceiverPairs = 1,
+    //      realMessage),
+    //    TestSettings(
+    //      testName = "1-to-1-size-1k",
+    //      totalMessages = adjustedTotalMessages(20000),
+    //      burstSize = 1000,
+    //      payloadSize = 1000,
+    //      senderReceiverPairs = 1,
+    //      realMessage),
+    //    TestSettings(
+    //      testName = "1-to-1-size-10k",
+    //      totalMessages = adjustedTotalMessages(10000),
+    //      burstSize = 1000,
+    //      payloadSize = 10000,
+    //      senderReceiverPairs = 1,
+    //      realMessage),
     TestSettings(
-      testName = "warmup",
+      testName = "5-to-5-a",
       totalMessages = adjustedTotalMessages(20000),
-      burstSize = 1000,
-      payloadSize = 100,
-      senderReceiverPairs = 1),
+      burstSize = 10, // don't exceed the send queue capacity 200*5*3=3000
+      payloadSize = 200,
+      senderReceiverPairs = 5,
+      realMessage),
     TestSettings(
-      testName = "1-to-1",
-      totalMessages = adjustedTotalMessages(50000),
-      burstSize = 1000,
-      payloadSize = 100,
-      senderReceiverPairs = 1),
-    TestSettings(
-      testName = "1-to-1-size-1k",
+      testName = "5-to-5-b",
       totalMessages = adjustedTotalMessages(20000),
-      burstSize = 1000,
-      payloadSize = 1000,
-      senderReceiverPairs = 1),
+      burstSize = 20, // don't exceed the send queue capacity 200*5*3=3000
+      payloadSize = 200,
+      senderReceiverPairs = 5,
+      realMessage),
     TestSettings(
-      testName = "1-to-1-size-10k",
-      totalMessages = adjustedTotalMessages(10000),
-      burstSize = 1000,
-      payloadSize = 10000,
-      senderReceiverPairs = 1),
+      testName = "5-to-5-c",
+      totalMessages = adjustedTotalMessages(20000),
+      burstSize = 200, // don't exceed the send queue capacity 200*5*3=3000
+      payloadSize = 100,
+      senderReceiverPairs = 5,
+      realMessage),
     TestSettings(
       testName = "5-to-5",
       totalMessages = adjustedTotalMessages(20000),
       burstSize = 200, // don't exceed the send queue capacity 200*5*3=3000
       payloadSize = 100,
-      senderReceiverPairs = 5))
+      senderReceiverPairs = 5,
+      realMessage))
 
   def test(testSettings: TestSettings): Unit = {
     import testSettings._
